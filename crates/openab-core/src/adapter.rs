@@ -4,7 +4,9 @@ use serde::Serialize;
 use std::sync::Arc;
 use tracing::{error, warn};
 
-use crate::acp::{classify_notification, parse_turn_result, AcpEvent, ContentBlock, SessionPool, TurnResult};
+use crate::acp::{
+    classify_notification, parse_turn_result, AcpEvent, ContentBlock, SessionPool, TurnResult,
+};
 use crate::config::{ReactionsConfig, ToolDisplay};
 use crate::error_display::{format_coded_error, format_user_error};
 use crate::format;
@@ -72,7 +74,12 @@ pub fn parse_output_directives(content: &str) -> (OutputDirectives, String) {
                         "reply_to" => {
                             let v = value.trim();
                             // Validate: non-empty, reasonable length, no whitespace/control chars
-                            if !v.is_empty() && v.len() <= 64 && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_') {
+                            if !v.is_empty()
+                                && v.len() <= 64
+                                && v.chars().all(|c| {
+                                    c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'
+                                })
+                            {
                                 directives.reply_to = Some(v.to_string());
                             }
                         }
@@ -197,6 +204,9 @@ pub fn split_delivery(
     (directives, body)
 }
 
+/// The session-reset notice prepended to the turn buffer when `reset` is set.
+pub(crate) const SESSION_RESET_NOTICE: &str = "⚠️ _Session expired, starting fresh..._\n\n";
+
 /// Apply the session-reset re-prepend rule to a finalized turn body.
 ///
 /// The session-reset notice (`"⚠️ _Session expired, starting fresh..._\n\n"`)
@@ -218,10 +228,21 @@ pub(crate) fn finalize_body(
     body: String,
 ) -> String {
     if reset && !keep_full_text && answer_start > 0 {
-        format!("⚠️ _Session expired, starting fresh..._\n\n{body}")
+        format!("{SESSION_RESET_NOTICE}{body}")
     } else {
         body
     }
+}
+
+/// True when `final_content` carries nothing beyond the session-reset notice
+/// (surrounding whitespace ignored) — i.e. the turn produced no real answer.
+/// Such a turn must still go through empty-turn classification instead of
+/// delivering the bare notice as if it were the agent's reply.
+pub(crate) fn is_notice_only_content(final_content: &str) -> bool {
+    final_content
+        .replacen(SESSION_RESET_NOTICE, "", 1)
+        .trim()
+        .is_empty()
 }
 
 // --- Platform-agnostic types ---
@@ -777,7 +798,7 @@ impl AdapterRouter {
                     let mut answer_start = 0usize;
 
                     if reset {
-                        text_buf.push_str("⚠️ _Session expired, starting fresh..._\n\n");
+                        text_buf.push_str(SESSION_RESET_NOTICE);
                     }
 
                     // Native streaming: defer stream_begin until first Text event
@@ -794,7 +815,7 @@ impl AdapterRouter {
                     // Streaming edit: send placeholder, spawn edit loop
                     let (buf_tx, placeholder_msg, edit_handle) = if streaming && !native {
                         let initial = if reset {
-                            "⚠️ _Session expired, starting fresh..._\n\n…".to_string()
+                            format!("{SESSION_RESET_NOTICE}…")
                         } else {
                             "…".to_string()
                         };
@@ -1134,7 +1155,11 @@ impl AdapterRouter {
                     // Build final content
                     let final_content =
                         display_for(platform_is_acp, &tool_lines, &text_buf, false, tool_display);
-                    let final_content = if final_content.is_empty() {
+                    // A reset turn whose only output is the session-reset notice is
+                    // still an empty turn: strip the notice before the emptiness
+                    // check so the classifier decides what to show instead of
+                    // leaking a bare banner to the consumer as if it were an answer.
+                    let final_content = if is_notice_only_content(&final_content) {
                         if turn_result.is_silent_failure() {
                             warn!(
                                 stop_reason = ?turn_result.stop_reason,
@@ -1144,7 +1169,16 @@ impl AdapterRouter {
                                 "agent returned empty turn (0 output tokens) — likely provider/model/auth failure"
                             );
                         }
-                        classify_empty_turn(response_error.as_deref(), &turn_result)
+                        let classified =
+                            classify_empty_turn(response_error.as_deref(), &turn_result);
+                        // Keep the reset notice attached: the consumer still needs
+                        // to know the session was reset — the classified body now
+                        // explains the empty turn instead of the notice posing as one.
+                        if reset {
+                            format!("{SESSION_RESET_NOTICE}{classified}")
+                        } else {
+                            classified
+                        }
                     } else if let Some(err) = response_error {
                         format!("⚠️ {err}\n\n{final_content}")
                     } else {
@@ -1388,16 +1422,17 @@ fn contains_bot_mention(content: &str) -> bool {
     while i + 2 < bytes.len() {
         if bytes[i] == b'<' && bytes[i + 1] == b'@' {
             // Skip optional '!' (nickname mention) or '&' (role mention)
-            let start = if i + 2 < bytes.len()
-                && (bytes[i + 2] == b'!' || bytes[i + 2] == b'&')
-            {
+            let start = if i + 2 < bytes.len() && (bytes[i + 2] == b'!' || bytes[i + 2] == b'&') {
                 i + 3
             } else {
                 i + 2
             };
             if start < bytes.len() && bytes[start].is_ascii_digit() {
                 if let Some(end) = content[start..].find('>') {
-                    if content[start..start + end].chars().all(|c| c.is_ascii_digit()) {
+                    if content[start..start + end]
+                        .chars()
+                        .all(|c| c.is_ascii_digit())
+                    {
                         return true;
                     }
                 }
@@ -1626,8 +1661,7 @@ fn compose_display(
                         // matches the sibling finished-fallback summary and
                         // the pre-PR raw-count behaviour that users are used
                         // to. A hidden group of `a×2` contributes 2, not 1.
-                        let hidden_groups =
-                            running_groups.len() - TOOL_COLLAPSE_THRESHOLD;
+                        let hidden_groups = running_groups.len() - TOOL_COLLAPSE_THRESHOLD;
                         let hidden_calls: usize = running_groups
                             .iter()
                             .take(hidden_groups)
@@ -1736,7 +1770,11 @@ fn propagate_mentions_to_chunks(
             } else {
                 let footer = format!(
                     "\n{}",
-                    missing.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(" ")
+                    missing
+                        .iter()
+                        .map(|m| m.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 );
                 if chunk.chars().count() + footer.chars().count() <= limit {
                     format!("{chunk}{footer}")
@@ -1761,7 +1799,10 @@ mod tests {
         assert_eq!(reply_message_limit("slack", 4096), 4096);
         // and a long reply under the ACP limit is a single chunk (delivered whole)
         let long = "x".repeat(50_000);
-        assert_eq!(crate::format::split_message(&long, reply_message_limit("acp", 4096)).len(), 1);
+        assert_eq!(
+            crate::format::split_message(&long, reply_message_limit("acp", 4096)).len(),
+            1
+        );
     }
 
     #[test]
@@ -2101,7 +2142,10 @@ mod tests {
             tool("3", "grep", ToolState::Completed),
         ];
         let out = compose_display(&tools, "done", false, ToolDisplay::Full);
-        assert!(!out.contains("(×"), "should not collapse across order: {out}");
+        assert!(
+            !out.contains("(×"),
+            "should not collapse across order: {out}"
+        );
         assert_eq!(out.matches("`grep`").count(), 2, "output: {out}");
         assert_eq!(out.matches("`curl`").count(), 1, "output: {out}");
     }
@@ -2364,7 +2408,9 @@ mod tests {
 #[cfg(test)]
 mod directive_tests {
     use super::parse_output_directives;
-    use super::{classify_empty_turn, SILENT_FAILURE_MSG};
+    use super::{
+        classify_empty_turn, is_notice_only_content, SESSION_RESET_NOTICE, SILENT_FAILURE_MSG,
+    };
     use crate::acp::TurnResult;
 
     #[test]
@@ -2585,5 +2631,23 @@ mod directive_tests {
         };
         let result = classify_empty_turn(None, &tr);
         assert_eq!(result, "_(no response)_");
+    }
+
+    #[test]
+    fn notice_only_content_is_empty() {
+        // Regression: a reset turn that produced nothing but the session-reset
+        // notice must still be classified as an empty turn — the bare banner
+        // must not reach the consumer as if it were the agent's answer.
+        assert!(is_notice_only_content(SESSION_RESET_NOTICE));
+        assert!(is_notice_only_content(""));
+        assert!(is_notice_only_content("   \n"));
+        assert!(!is_notice_only_content("answer text"));
+        assert!(!is_notice_only_content(&format!(
+            "{SESSION_RESET_NOTICE}the final answer"
+        )));
+        // Notice embedded mid-content (tool lines prepended) still counts as content.
+        assert!(!is_notice_only_content(&format!(
+            "✅ Ran x\n{SESSION_RESET_NOTICE}"
+        )));
     }
 }
