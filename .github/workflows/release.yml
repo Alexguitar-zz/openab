@@ -39,7 +39,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          OWNER="${{ github.repository_owner }}"
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           REPO="${GITHUB_REPOSITORY##*/}"
           CHART=charts/openab
           NAME=$(grep '^name:' ${CHART}/Chart.yaml | awk '{print $2}')

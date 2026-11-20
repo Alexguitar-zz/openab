@@ -108,6 +108,11 @@ jobs:
         with:
           ref: ${{ inputs.branch }}
 
+      # GHCR image refs must be all-lowercase; github.repository keeps the
+      # owner/repo casing, which breaks on owners with uppercase letters.
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v4
@@ -148,6 +153,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.branch }}
+
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -217,6 +225,9 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 

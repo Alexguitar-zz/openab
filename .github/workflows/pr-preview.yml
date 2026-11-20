@@ -117,6 +117,11 @@ jobs:
           repository: ${{ needs.resolve-pr.outputs.repo }}
           ref: ${{ needs.resolve-pr.outputs.ref }}
 
+      # GHCR image refs must be all-lowercase; github.repository keeps the
+      # owner/repo casing, which breaks on owners with uppercase letters.
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v4
@@ -165,6 +170,9 @@ jobs:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
+
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 

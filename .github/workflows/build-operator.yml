@@ -96,6 +96,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # GHCR image refs must be all-lowercase; github.repository keeps the
+      # owner/repo casing, which breaks on owners with uppercase letters.
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v4
@@ -135,6 +140,9 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v6
+
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -208,6 +216,9 @@ jobs:
             fi
           done
 
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v4
@@ -259,6 +270,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -341,4 +355,6 @@ jobs:
           CHART_VERSION: ${{ needs.resolve-tag.outputs.chart_version }}
         run: |
           helm package charts/openab
-          helm push openab-${CHART_VERSION}.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+          # OCI refs must be all-lowercase; repository_owner keeps its casing.
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          helm push openab-${CHART_VERSION}.tgz "oci://ghcr.io/${OWNER}/charts"
